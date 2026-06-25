@@ -105,11 +105,11 @@
   .distline{stroke:var(--pink);stroke-width:1.2;stroke-dasharray:4,3;fill:none;opacity:.8;}
   .distline.active-line{stroke:var(--pink);opacity:1;stroke-dasharray:none;stroke-width:1.5;}
   .labelbox-rect{fill:#f8f7f2;stroke:#1a1a1a;stroke-width:1.2;}
-  .labelbox-l1{font-family:'Courier New',Consolas,monospace;font-size:8.5px;fill:#111;font-weight:bold;}
-  .labelbox-l2{font-family:'Courier New',Consolas,monospace;font-size:8.5px;fill:#333;}
-  .labelbox-l3{font-family:Arial,Helvetica,sans-serif;font-size:7.5px;fill:#555;}
+  .labelbox-l1{font-family:'Courier New',Consolas,monospace;font-size:9.5px;fill:#111;font-weight:bold;}
+  .labelbox-l2{font-family:'Courier New',Consolas,monospace;font-size:9.5px;fill:#333;}
+  .labelbox-l3{font-family:Arial,Helvetica,sans-serif;font-size:8.5px;fill:#555;}
   .bearing-text{
-    font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:bold;
+    font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:bold;
     fill:var(--pink);paint-order:stroke;stroke:#000;stroke-width:3px;
   }
 
@@ -143,7 +143,7 @@
 <div id="app">
   <div id="sidebar">
     <img id="logo-img" src="logo.png" alt="pu4fos bhmg" onerror="this.style.display='none'">
-    <p id="intro-text">No site Anatel Mosaico, <strong>MMAR Radioamador, Consulta repetidora</strong>, consulte e exporte o arquivo .csv e carregue-o logo abaixo, junto da sua localização, e veja no mapa as repetidoras registradas ao seu redor, com indicativo, frequência, direção do offset e distância geográfica.</p>
+    <p id="intro-text">No site Anatel Mosaico, <strong>MMAR Radioamador, Consulta repetidora</strong>, consulte e exporte o arquivo .csv e carregue-o logo abaixo, junto da sua localização, e veja no mapa as repetidoras registradas ao seu redor, com indicativo, frequência, distância geográfica e direção do offset <em>(6m 1MHz, 2m 0,6MHz, 1,25m 1,6MHz, 70cm 5MHz, 33cm 12MHz, 23cm 20MHz)</em>.</p>
 
     <label>Sua localização (lat, lon)</label>
     <div style="display:flex;gap:6px;align-items:stretch">
@@ -406,6 +406,12 @@
   /* ================================================================
      CSV
   ================================================================ */
+  /* Converte número no formato brasileiro (1.287,600 ou 147,120) para float */
+  function parseBRNum(s){
+    // Remove ponto de milhar, troca vírgula decimal por ponto
+    return parseFloat(s.trim().replace(/\./g,'').replace(',','.'));
+  }
+
   function parseCSV(text){
     const lines = text.split(/\r?\n/).filter(l=>l.trim().length>0);
     if(lines.length<2) throw new Error('CSV vazio ou sem dados.');
@@ -415,43 +421,53 @@
       if(!m || m.length<4) return acc;
       const r = m.map(x=>x.slice(1,-1));
 
-      // Colunas fixas (sempre presentes e na mesma posição)
       const indicativo = (r[1]||'').trim();
-      const lat = parseFloat(r[2]);
-      const lon = parseFloat(r[3]);
+      let lat = parseFloat(r[2]);
+      let lon = parseFloat(r[3]);
       if(isNaN(lat)||isNaN(lon)) return acc;
 
-      // Frequências: pode ser r[4] um campo único com vários pares separados por ";"
-      // OU múltiplos campos extras (ex: r[4], r[5] = frequências adicionais).
-      // Estratégia: varrer r a partir de r[4], juntar tudo até encontrar a validade
-      // (validade = campo que parece data: dd/mm/aaaa ou aaaa-mm-dd).
-      const isDate = s => /^\d{2}\/\d{2}\/\d{4}$/.test(s) || /^\d{4}-\d{2}-\d{2}$/.test(s);
-      const isFreq = s => /[\d,.]/.test(s) && /[\/]/.test(s);
+      // Anatel às vezes omite o sinal negativo nas coordenadas.
+      // Todo o território brasileiro tem lat < 0 (sul do equador, exceto extremo norte ~+5°)
+      // e lon < 0 (ocidente). Regras conservadoras para corrigir:
+      //   • lon positiva → sempre errado para o Brasil, negar
+      //   • lat > 6 → acima do extremo norte do Brasil (~5.3°N), claramente invertida, negar
+      if(lon > 0) lon = -lon;
+      if(lat > 6) lat = -lat;
 
-      // Coletar todos os campos de frequência (não-data, a partir de r[4])
-      let freqFields = [];
+      // Identificar campo de frequência e validade
+      const isDate = s => /^\d{2}\/\d{2}\/\d{4}$/.test(s) || /^\d{4}-\d{2}-\d{2}$/.test(s);
+
+      // Coletar campos de frequência (r[4] em diante, até encontrar data ou fim)
+      let freqRaw = '';
       for(let i=4; i<r.length; i++){
         const v = r[i].trim();
-        if(isDate(v)) break;         // chegou na validade, para
-        if(v) freqFields.push(v);
+        if(isDate(v)) break;
+        if(v) freqRaw += (freqRaw ? ';' : '') + v;
       }
-      // Cada freqField pode conter múltiplos pares separados por ";"
-      // Normaliza tudo numa lista de pares "f1 / f2"
-      const rawPairs = freqFields
-        .join(';')                        // une campos extras
-        .split(';')                       // separa por ";"
+      if(!freqRaw) return acc;
+
+      // Split por ";" para obter cada dupla entrada/saída
+      const pairs = freqRaw
+        .split(';')
         .map(s => s.replace(/MHz/gi,'').trim())
-        .filter(s => s.includes('/'));    // só os que têm "/"
+        .filter(s => s.includes('/'));
 
-      if(!rawPairs.length) return acc;
+      if(!pairs.length) return acc;
 
-      // Processa o PRIMEIRO par (frequência principal da repetidora)
-      const firstPair = rawPairs[0].split('/').map(s=>parseFloat(s.trim().replace(',','.')));
-      const f1 = firstPair[0], f2 = firstPair[1];
-      if(isNaN(f1)) return acc;
-      const sign = isNaN(f2) ? '' : (f2>f1 ? '+' : (f2<f1 ? '-' : ''));
+      // Processar cada dupla
+      const freqs = pairs.reduce((fa, pair)=>{
+        const parts = pair.split('/').map(s => parseBRNum(s));
+        const f1 = parts[0], f2 = parts[1];
+        if(isNaN(f1)) return fa;
+        const sign = isNaN(f2) ? '' : (f2>f1 ? '+' : (f2<f1 ? '-' : ''));
+        // Formatar: >= 1000 MHz mostra 4 casas (ex: 1287.600), senão 3
+        const fmt = f1 >= 1000 ? f1.toFixed(3) : f1.toFixed(3);
+        fa.push({freq1: fmt, sign});
+        return fa;
+      },[]);
 
-      acc.push({indicativo: indicativo||'????', lat, lon, freq1: f1.toFixed(3), sign});
+      if(!freqs.length) return acc;
+      acc.push({indicativo: indicativo||'????', lat, lon, freqs});
       return acc;
     },[]);
   }
@@ -479,6 +495,8 @@
       }catch(err){setStatus('Erro: '+err.message,true);}
     };
     reader.readAsText(file,'UTF-8');
+    // Reset do input: garante que selecionar o mesmo arquivo novamente dispara o evento
+    e.target.value = '';
   });
 
   document.getElementById('setuser').addEventListener('click', function(){
@@ -617,11 +635,11 @@
     // Escolhe resolução conforme zoom
     let dLon, dLat, precision, fontSize, opacity;
     if(zoom <= 6){
-      dLon=20; dLat=10; precision=1; fontSize=11; opacity=0.55;
+      dLon=20; dLat=10; precision=1; fontSize=12; opacity=0.55;
     } else if(zoom <= 10){
-      dLon=2; dLat=1; precision=2; fontSize=10; opacity=0.50;
+      dLon=2; dLat=1; precision=2; fontSize=11; opacity=0.50;
     } else {
-      dLon=2/12; dLat=1/24; precision=3; fontSize=9; opacity=0.45;
+      dLon=2/12; dLat=1/24; precision=3; fontSize=10; opacity=0.45;
       // subsquare = 5'lon × 2.5'lat = 5/60 lon × 2.5/60 lat
       dLon = 5/60; dLat = 2.5/60;
     }
@@ -719,28 +737,41 @@
     // + a estação ativa sempre (independente do zoom)
     const needsBox = stPts.map((_,i) => showLabels || i === activeIdx);
     if(needsBox.some(Boolean)){
-      const W=62, H=uPt?35:26;
-      const OX=13+W/2, OY=-13;
+      const W  = 74;   // largura fixa (cabe "1287.600 +" com folga)
+      const LH = 10;   // altura de cada linha de frequência
+      const OX = 13 + W/2, OY = -13;
 
       const items = stPts
-        .map((s,i) => needsBox[i] ? {
-          anchor:s.p, ox:OX, oy:OY, w:W, h:H,
-          data:{...s, km:uPt?haversineKm(user.lat,user.lon,s.lat,s.lon):null, idx:i}
-        } : null)
+        .map((s,i) => {
+          if(!needsBox[i]) return null;
+          const nf  = s.freqs.length;
+          // Altura: 1 linha indicativo (11px) + nf linhas freq (LH cada) + opcional km + padding
+          const km  = uPt ? haversineKm(user.lat,user.lon,s.lat,s.lon) : null;
+          const H   = 6 + 11 + nf*LH + (km!=null ? LH : 0) + 4;
+          return { anchor:s.p, ox:OX, oy:OY, w:W, h:H,
+                   data:{...s, km, idx:i, H} };
+        })
         .filter(Boolean);
 
       const boxes = layoutBoxes(items);
 
       boxes.forEach(box=>{
-        const s=box.data;
-        const ep=edgePt(box,box.anchor.x,box.anchor.y);
-        const bx=box.x-box.w/2, by=box.y-box.h/2, cx=box.x;
-        html+=`<line class="leader" x1="${box.anchor.x}" y1="${box.anchor.y}" x2="${ep.x}" y2="${ep.y}"/>`;
-        html+=`<rect class="labelbox-rect" x="${bx}" y="${by}" width="${box.w}" height="${box.h}" rx="4"/>`;
-        html+=`<text class="labelbox-l1" x="${cx}" y="${by+11}" text-anchor="middle">${esc(s.indicativo)}</text>`;
-        html+=`<text class="labelbox-l2" x="${cx}" y="${by+21}" text-anchor="middle">${esc(s.freq1)}${s.sign?' '+s.sign:''}</text>`;
-        if(s.km!=null){
-          html+=`<text class="labelbox-l3" x="${cx}" y="${by+30}" text-anchor="middle">${s.km.toFixed(1)} km</text>`;
+        const s  = box.data;
+        const ep = edgePt(box, box.anchor.x, box.anchor.y);
+        const bx = box.x - box.w/2, by = box.y - box.h/2, cx = box.x;
+        html += `<line class="leader" x1="${box.anchor.x}" y1="${box.anchor.y}" x2="${ep.x}" y2="${ep.y}"/>`;
+        html += `<rect class="labelbox-rect" x="${bx}" y="${by}" width="${box.w}" height="${box.h}" rx="4"/>`;
+        // Linha 1: indicativo
+        html += `<text class="labelbox-l1" x="${cx}" y="${by+11}" text-anchor="middle">${esc(s.indicativo)}</text>`;
+        // Linhas 2..N: cada par de frequência
+        s.freqs.forEach((f,fi)=>{
+          const fy = by + 11 + (fi+1)*LH;
+          html += `<text class="labelbox-l2" x="${cx}" y="${fy}" text-anchor="middle">${esc(f.freq1)}${f.sign?' ('+f.sign+')':''}</text>`;
+        });
+        // Última linha: distância km (se usuário definido)
+        if(s.km != null){
+          const ky = by + 11 + s.freqs.length*LH + LH - 1;
+          html += `<text class="labelbox-l3" x="${cx}" y="${ky}" text-anchor="middle">${s.km.toFixed(1)} km</text>`;
         }
       });
     }
